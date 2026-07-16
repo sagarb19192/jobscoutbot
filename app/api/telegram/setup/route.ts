@@ -1,4 +1,4 @@
-import { getBotToken, getCronSecret, getRapidApiKey, getWebhookSecret } from "@/lib/env"
+import { getAdzunaAppId, getAdzunaAppKey, getBotToken, getCronSecret, getWebhookSecret } from "@/lib/env"
 import { getWebhookInfo, setWebhook } from "@/lib/telegram"
 
 function getBaseUrl() {
@@ -15,7 +15,8 @@ export async function GET() {
   const missing: string[] = []
   if (!getBotToken()) missing.push("TELEGRAM_BOT_TOKEN")
   if (!getWebhookSecret()) missing.push("TELEGRAM_WEBHOOK_SECRET")
-  if (!getRapidApiKey()) missing.push("RAPIDAPI_KEY")
+  if (!getAdzunaAppId()) missing.push("ADZUNA_APP_ID")
+  if (!getAdzunaAppKey()) missing.push("ADZUNA_APP_KEY")
   if (!getCronSecret()) missing.push("CRON_SECRET")
 
   let webhookInfo = null
