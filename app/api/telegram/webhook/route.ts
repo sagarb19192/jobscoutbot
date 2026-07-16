@@ -138,7 +138,7 @@ async function handleLocation(user: BotUser, location: string) {
 
   const updated = { ...user, location, state: "active" }
   try {
-    const count = await searchAndSendJobs(updated, { datePosted: "week" })
+    const count = await searchAndSendJobs(updated, { datePosted: "month" })
     if (count === 0) {
       await sendMessage(
         user.chatId,
@@ -207,7 +207,7 @@ async function handleCommand(user: BotUser, text: string) {
       await sendChatAction(chatId, "typing")
       await sendMessage(chatId, "Searching for jobs...")
       try {
-        const count = await searchAndSendJobs(user, { datePosted: "week" })
+        const count = await searchAndSendJobs(user, { datePosted: "month" })
         if (count === 0) {
           await sendMessage(chatId, "No jobs found for your roles this week. I'll notify you as soon as new ones are posted.")
         }

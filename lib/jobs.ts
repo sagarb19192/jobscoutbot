@@ -12,6 +12,10 @@ export interface JobResult {
   url: string
   source: string
   postedAt?: string
+  minSalary?: number
+  maxSalary?: number
+  salaryCurrency?: string
+  salaryPeriod?: string
 }
 
 interface JSearchJob {
@@ -25,21 +29,30 @@ interface JSearchJob {
   job_publisher?: string
   job_posted_at_datetime_utc?: string
   job_is_remote?: boolean
+  job_min_salary?: number
+  job_max_salary?: number
+  job_salary_currency?: string
+  job_salary_period?: string
 }
 
 export async function searchJobs(
   query: string,
   location: string,
-  options?: { datePosted?: "all" | "today" | "3days" | "week" | "month" },
+  options?: { datePosted?: "all" | "today" | "3days" | "week" | "month"; numPages?: number },
 ): Promise<JobResult[]> {
   const apiKey = getRapidApiKey()
   if (!apiKey) throw new Error("RapidAPI key is not set (RAPIDAPI_KEY or RAPIDAPI_ACCESS_TOKEN)")
 
+  const locationQuery = location.toLowerCase() === "remote"
+    ? `${query} remote`
+    : `${query} in ${location}`
+
   const params = new URLSearchParams({
-    query: `${query} in ${location}`,
+    query: locationQuery,
     page: "1",
-    num_pages: "1",
-    date_posted: options?.datePosted ?? "week",
+    num_pages: String(options?.numPages ?? 2),
+    date_posted: options?.datePosted ?? "month",
+    remote_jobs_only: location.toLowerCase() === "remote" ? "true" : "false",
   })
 
   const res = await fetch(`https://jsearch.p.rapidapi.com/search?${params}`, {
@@ -66,6 +79,10 @@ export async function searchJobs(
     url: job.job_apply_link,
     source: job.job_publisher ?? "Web",
     postedAt: job.job_posted_at_datetime_utc,
+    minSalary: job.job_min_salary,
+    maxSalary: job.job_max_salary,
+    salaryCurrency: job.job_salary_currency,
+    salaryPeriod: job.job_salary_period,
   }))
 }
 
@@ -96,32 +113,63 @@ export async function markJobsSeen(chatId: string, jobs: JobResult[]) {
     .onConflictDoNothing()
 }
 
+function formatSalary(job: JobResult): string | null {
+  if (!job.minSalary && !job.maxSalary) return null
+  const currency = job.salaryCurrency ?? ""
+  const period = job.salaryPeriod ? `/${job.salaryPeriod.toLowerCase()}` : ""
+  const fmt = (n: number) =>
+    n >= 100000 ? `${(n / 1000).toFixed(0)}K` : n.toLocaleString()
+  if (job.minSalary && job.maxSalary) {
+    return `${currency}${fmt(job.minSalary)} – ${currency}${fmt(job.maxSalary)}${period}`
+  }
+  if (job.maxSalary) return `Up to ${currency}${fmt(job.maxSalary)}${period}`
+  if (job.minSalary) return `From ${currency}${fmt(job.minSalary)}${period}`
+  return null
+}
+
+function sortBySalary(jobs: JobResult[]): JobResult[] {
+  return [...jobs].sort((a, b) => {
+    const salaryA = a.maxSalary ?? a.minSalary ?? 0
+    const salaryB = b.maxSalary ?? b.minSalary ?? 0
+    // Jobs with salary info always come before those without
+    if (salaryA === 0 && salaryB > 0) return 1
+    if (salaryB === 0 && salaryA > 0) return -1
+    return salaryB - salaryA
+  })
+}
+
 export function formatJobsMessage(jobs: JobResult[], heading: string): string {
+  const sorted = sortBySalary(jobs)
   const lines = [`<b>${escapeHtml(heading)}</b>`, ""]
-  for (const job of jobs.slice(0, 10)) {
+  for (const job of sorted.slice(0, 10)) {
+    const salary = formatSalary(job)
     lines.push(
       `<b>${escapeHtml(job.title)}</b>`,
-      `${escapeHtml(job.company)} — ${escapeHtml(job.location)}`,
-      `Source: ${escapeHtml(job.source)}`,
-      `<a href="${job.url}">Apply here</a>`,
+      `🏢 ${escapeHtml(job.company)} — 📍 ${escapeHtml(job.location)}`,
+      salary ? `💰 ${escapeHtml(salary)}` : "",
+      `🔗 <a href="${job.url}">Apply here</a> (${escapeHtml(job.source)})`,
       "",
     )
   }
-  return lines.join("\n")
+  return lines.filter((l, i, arr) => !(l === "" && arr[i - 1] === "")).join("\n")
 }
 
 export async function searchAndSendJobs(
   user: BotUser,
   options?: { onlyNew?: boolean; datePosted?: "all" | "today" | "3days" | "week" | "month" },
 ): Promise<number> {
-  const roles = (user.roles ?? []).slice(0, 2)
+  // Search ALL roles (up to 6), not just the first 2
+  const roles = (user.roles ?? []).slice(0, 6)
   const location = user.location ?? "India"
   if (roles.length === 0) return 0
 
   const allJobs: JobResult[] = []
   for (const role of roles) {
     try {
-      const jobs = await searchJobs(role, location, { datePosted: options?.datePosted })
+      const jobs = await searchJobs(role, location, {
+        datePosted: options?.datePosted ?? "month",
+        numPages: 2,
+      })
       allJobs.push(...jobs)
     } catch (error) {
       console.error(`[jobs] search failed for role "${role}":`, error)
@@ -136,7 +184,7 @@ export async function searchAndSendJobs(
 
   const heading = options?.onlyNew
     ? `${toSend.length} new job posting${toSend.length > 1 ? "s" : ""} for you`
-    : `Top job matches for ${roles.join(", ")} in ${location}`
+    : `Top ${Math.min(toSend.length, 10)} job matches for ${roles.join(", ")} in ${location} (last month)`
 
   await sendMessage(user.chatId, formatJobsMessage(toSend, heading))
   await markJobsSeen(user.chatId, toSend.slice(0, 10))

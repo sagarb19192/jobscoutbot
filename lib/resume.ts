@@ -10,9 +10,14 @@ const resumeSchema = z.object({
   roles: z
     .array(z.string())
     .min(1)
-    .max(4)
+    .max(6)
     .describe(
-      "2-4 job titles this candidate is best suited for, ordered by fit, e.g. 'Frontend Developer', 'Full Stack Engineer'",
+      "3-6 specific, searchable job titles best suited for this candidate ordered by fit. " +
+      "IMPORTANT: If the resume mentions niche frameworks or platforms, use those as primary roles. " +
+      "Examples: if Frappe/ERPNext → 'Frappe Developer', 'ERPNext Developer'; " +
+      "if Django → 'Django Developer'; if React → 'React Developer'; " +
+      "if Salesforce → 'Salesforce Developer'; if SAP → 'SAP Developer'. " +
+      "Always prefer specific titles over generic ones like 'Software Developer'.",
     ),
   experience: z
     .string()
@@ -50,14 +55,24 @@ export async function parseResume(resumeText: string): Promise<ParsedResume> {
   const { output } = await generateText({
     model: openai("gpt-4o-mini"),
     output: Output.object({ schema: resumeSchema }),
-    prompt: `You are an expert technical recruiter. Analyze this resume and extract:
-1. The candidate's name
-2. All technical skills / tech stack
-3. The 2-4 job roles/titles that best match this candidate for job searching
-4. A short experience summary
+    prompt: `You are an expert technical recruiter specializing in matching candidates to job postings.
+Analyze this resume and extract:
+1. The candidate's full name
+2. All technical skills, frameworks, tools, and tech stack mentioned
+3. 3-6 SPECIFIC job role titles to search job boards with — ranked by best fit.
+   - CRITICAL: If the resume mentions niche/specific frameworks or platforms, those MUST be the primary roles.
+   - Examples:
+     * Frappe / ERPNext mentioned → include "Frappe Developer", "ERPNext Developer"
+     * Django mentioned → include "Django Developer"  
+     * React/Next.js mentioned → include "React Developer" or "Next.js Developer"
+     * SAP mentioned → include "SAP Developer" or "SAP Consultant"
+     * Salesforce mentioned → include "Salesforce Developer"
+   - Also include broader roles like "Full Stack Developer" or "Backend Developer" as secondary options
+   - Avoid overly generic titles like "Software Developer" unless no specific tech is found
+4. A short experience summary (e.g. "2+ years", "Fresher", "5+ years senior")
 
 Resume:
-${resumeText.slice(0, 12000)}`,
+${resumeText.slice(0, 14000)}`,
   })
   return output
 }
