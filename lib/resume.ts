@@ -1,4 +1,5 @@
 import { generateText, Output } from "ai"
+import { openai } from "@ai-sdk/openai"
 import { z } from "zod"
 
 const resumeSchema = z.object({
@@ -47,7 +48,7 @@ export async function extractTextFromFile(
 
 export async function parseResume(resumeText: string): Promise<ParsedResume> {
   const { output } = await generateText({
-    model: "openai/gpt-4o-mini",
+    model: openai("gpt-4o-mini"),
     output: Output.object({ schema: resumeSchema }),
     prompt: `You are an expert technical recruiter. Analyze this resume and extract:
 1. The candidate's name
