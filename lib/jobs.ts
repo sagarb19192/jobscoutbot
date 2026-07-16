@@ -24,9 +24,7 @@ interface AdzunaJob {
   redirect_url: string
   salary_min?: number
   salary_max?: number
-  created: string // ISO date
-  category?: { label: string }
-  adref?: string
+  created: string
 }
 
 function getAdzunaCredentials(): { appId: string; appKey: string } | null {
@@ -36,21 +34,18 @@ function getAdzunaCredentials(): { appId: string; appKey: string } | null {
   return { appId, appKey }
 }
 
-// Map user location to Adzuna country code
 function getCountryCode(location: string): string {
   const loc = location.toLowerCase()
-  if (loc === "remote" || loc === "india" || loc.includes("hyderabad") || loc.includes("bangalore") ||
-      loc.includes("bengaluru") || loc.includes("mumbai") || loc.includes("pune") ||
-      loc.includes("chennai") || loc.includes("delhi") || loc.includes("kolkata") ||
-      loc.includes("ahmedabad") || loc.includes("surat")) {
-    return "in"
-  }
-  // fallback to India for unrecognized locations (most users are India-based)
-  return "in"
+  // All Indian cities → use "in"
+  const indianKeywords = ["india", "remote", "hyderabad", "bangalore", "bengaluru",
+    "mumbai", "pune", "chennai", "delhi", "kolkata", "ahmedabad", "surat",
+    "noida", "gurugram", "gurgaon", "kochi", "jaipur", "indore", "bhopal"]
+  if (indianKeywords.some((k) => loc.includes(k))) return "in"
+  return "in" // default to India
 }
 
 export async function searchJobs(
-  query: string,
+  role: string,
   location: string,
   options?: { daysOld?: number; page?: number },
 ): Promise<JobResult[]> {
@@ -60,24 +55,22 @@ export async function searchJobs(
   const countryCode = getCountryCode(location)
   const page = options?.page ?? 1
   const daysOld = options?.daysOld ?? 30
+  const isRemote = location.toLowerCase() === "remote"
 
   const params = new URLSearchParams({
     app_id: creds.appId,
     app_key: creds.appKey,
-    what: query,
+    // what_phrase = exact phrase match → "Frappe Developer" not "Frappe OR Developer"
+    what_phrase: role,
     results_per_page: "20",
     max_days_old: String(daysOld),
-    sort_by: "salary", // sort by salary desc where available
+    sort_by: "salary",
     sort_direction: "down",
   })
 
-  // For India-specific city, add location param
-  const isRemote = location.toLowerCase() === "remote"
+  // Add city filter for specific locations
   if (!isRemote && location.toLowerCase() !== "india") {
     params.set("where", location)
-  }
-  if (isRemote) {
-    params.set("what_or", query + " remote work from home")
   }
 
   const url = `https://api.adzuna.com/v1/api/jobs/${countryCode}/search/${page}?${params}`
@@ -90,18 +83,29 @@ export async function searchJobs(
   }
 
   const data = (await res.json()) as { results?: AdzunaJob[] }
-  return (data.results ?? []).map((job) => ({
-    jobId: job.id,
-    title: job.title,
-    company: job.company?.display_name ?? "Unknown",
-    location: job.location?.display_name ?? location,
-    url: job.redirect_url,
-    source: "Adzuna",
-    postedAt: job.created,
-    minSalary: job.salary_min,
-    maxSalary: job.salary_max,
-    salaryCurrency: "INR",
-  }))
+
+  // Key terms from the role for relevance filtering
+  const roleTerms = role.toLowerCase().split(/\s+/).filter((t) => t.length > 2)
+
+  return (data.results ?? [])
+    .filter((job) => {
+      // Only keep jobs whose title actually contains at least one term from the role
+      const titleLower = job.title.toLowerCase()
+      return roleTerms.some((term) => titleLower.includes(term))
+    })
+    .map((job) => ({
+      jobId: job.id,
+      // Clean titles like "Frappe Developer(1603.8779)" → "Frappe Developer"
+      title: job.title.replace(/\s*\([\d.\s]+\)\s*$/, "").trim(),
+      company: job.company?.display_name ?? "Unknown",
+      location: job.location?.display_name ?? location,
+      url: job.redirect_url,
+      source: "Adzuna",
+      postedAt: job.created,
+      minSalary: job.salary_min,
+      maxSalary: job.salary_max,
+      salaryCurrency: "INR",
+    }))
 }
 
 export async function filterNewJobs(chatId: string, jobs: JobResult[]): Promise<JobResult[]> {
@@ -138,9 +142,7 @@ function formatSalary(job: JobResult): string | null {
     if (n >= 1000) return `₹${(n / 1000).toFixed(0)}K`
     return `₹${n}`
   }
-  if (job.minSalary && job.maxSalary) {
-    return `${fmt(job.minSalary)} – ${fmt(job.maxSalary)}/yr`
-  }
+  if (job.minSalary && job.maxSalary) return `${fmt(job.minSalary)} – ${fmt(job.maxSalary)}/yr`
   if (job.maxSalary) return `Up to ${fmt(job.maxSalary)}/yr`
   if (job.minSalary) return `From ${fmt(job.minSalary)}/yr`
   return null
@@ -181,9 +183,10 @@ export async function searchAndSendJobs(
   if (roles.length === 0) return 0
 
   const allJobs: JobResult[] = []
+
   for (const role of roles) {
     try {
-      // Fetch 2 pages per role for broader coverage
+      // Fetch page 1 and 2 concurrently per role
       const [page1, page2] = await Promise.allSettled([
         searchJobs(role, location, { daysOld: options?.daysOld ?? 30, page: 1 }),
         searchJobs(role, location, { daysOld: options?.daysOld ?? 30, page: 2 }),
@@ -201,9 +204,10 @@ export async function searchAndSendJobs(
 
   if (toSend.length === 0) return 0
 
+  const rolesSummary = roles.slice(0, 3).join(", ")
   const heading = options?.onlyNew
     ? `${toSend.length} new job posting${toSend.length > 1 ? "s" : ""} for you`
-    : `Top ${Math.min(toSend.length, 10)} job matches for ${roles.slice(0, 3).join(", ")} in ${location} (last 30 days)`
+    : `Top ${Math.min(toSend.length, 10)} matches for ${rolesSummary} in ${location} (last 30 days)`
 
   await sendMessage(user.chatId, formatJobsMessage(toSend, heading))
   await markJobsSeen(user.chatId, toSend.slice(0, 10))
