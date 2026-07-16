@@ -8,104 +8,112 @@ export interface JobResult {
   title: string
   company: string
   location: string
-  url: string
-  source: string
+  applyUrl: string       // direct apply link (LinkedIn, Indeed, etc.)
+  via: string            // platform it was listed on
   postedAt?: string
-  minSalary?: number
-  maxSalary?: number
-  salaryCurrency?: string
+  isRemote?: boolean
+  isSenior?: boolean
 }
 
-interface AdzunaJob {
-  id: string
+interface SerpApiJob {
+  job_id: string
   title: string
-  company: { display_name: string }
-  location: { display_name: string }
-  redirect_url: string
-  salary_min?: number
-  salary_max?: number
-  created: string
+  company_name: string
+  location: string
+  via?: string
+  description?: string
+  detected_extensions?: {
+    posted_at?: string
+    work_from_home?: boolean
+    schedule_type?: string
+  }
+  apply_options?: Array<{ title: string; link: string }>
 }
 
-function getAdzunaCredentials(): { appId: string; appKey: string } | null {
-  const appId = process.env.ADZUNA_APP_ID
-  const appKey = process.env.ADZUNA_APP_KEY
-  if (!appId || !appKey) return null
-  return { appId, appKey }
+function getSerpApiKey(): string | null {
+  return process.env.SERPAPI_KEY ?? null
 }
 
-function getCountryCode(location: string): string {
-  const loc = location.toLowerCase()
-  // All Indian cities → use "in"
-  const indianKeywords = ["india", "remote", "hyderabad", "bangalore", "bengaluru",
-    "mumbai", "pune", "chennai", "delhi", "kolkata", "ahmedabad", "surat",
-    "noida", "gurugram", "gurgaon", "kochi", "jaipur", "indore", "bhopal"]
-  if (indianKeywords.some((k) => loc.includes(k))) return "in"
-  return "in" // default to India
+// Keywords that indicate senior / experienced roles
+const SENIOR_KEYWORDS = [
+  "senior", "sr.", "lead", "principal", "architect",
+  "manager", "head", "3+", "4+", "5+", "experienced",
+]
+
+function isSeniorRole(title: string, description?: string): boolean {
+  const combined = `${title} ${description ?? ""}`.toLowerCase()
+  return SENIOR_KEYWORDS.some((kw) => combined.includes(kw))
+}
+
+function getLinkedInApplyUrl(job: SerpApiJob): string {
+  // Prefer LinkedIn apply link, fall back to first available
+  const options = job.apply_options ?? []
+  const linkedin = options.find((o) => o.title?.toLowerCase().includes("linkedin"))
+  const other = options[0]
+  return linkedin?.link ?? other?.link ?? ""
 }
 
 export async function searchJobs(
-  role: string,
+  query: string,
   location: string,
-  options?: { daysOld?: number; page?: number },
+  options?: { onlySenior?: boolean },
 ): Promise<JobResult[]> {
-  const creds = getAdzunaCredentials()
-  if (!creds) throw new Error("Adzuna credentials not set (ADZUNA_APP_ID, ADZUNA_APP_KEY)")
+  const apiKey = getSerpApiKey()
+  if (!apiKey) throw new Error("SERPAPI_KEY is not set")
 
-  const countryCode = getCountryCode(location)
-  const page = options?.page ?? 1
-  const daysOld = options?.daysOld ?? 30
   const isRemote = location.toLowerCase() === "remote"
+  const locationQuery = isRemote ? `${query} remote` : `${query} ${location}`
 
   const params = new URLSearchParams({
-    app_id: creds.appId,
-    app_key: creds.appKey,
-    // what_phrase = exact phrase match → "Frappe Developer" not "Frappe OR Developer"
-    what_phrase: role,
-    results_per_page: "20",
-    max_days_old: String(daysOld),
-    sort_by: "salary",
-    sort_direction: "down",
+    engine: "google_jobs",
+    q: locationQuery,
+    chips: "date_posted:month",   // last 1 month
+    api_key: apiKey,
+    hl: "en",
+    gl: "in",                     // results from India region
+    no_cache: "false",
   })
 
-  // Add city filter for specific locations
-  if (!isRemote && location.toLowerCase() !== "india") {
-    params.set("where", location)
-  }
-
-  const url = `https://api.adzuna.com/v1/api/jobs/${countryCode}/search/${page}?${params}`
-  const res = await fetch(url)
+  const res = await fetch(`https://serpapi.com/search.json?${params}`)
 
   if (!res.ok) {
     const body = await res.text()
-    console.error("[jobs] Adzuna request failed:", res.status, body)
-    throw new Error(`Adzuna API error: ${res.status}`)
+    console.error("[jobs] SerpAPI request failed:", res.status, body)
+    throw new Error(`SerpAPI error: ${res.status}`)
   }
 
-  const data = (await res.json()) as { results?: AdzunaJob[] }
+  const data = (await res.json()) as { jobs_results?: SerpApiJob[]; error?: string }
 
-  // Key terms from the role for relevance filtering
-  const roleTerms = role.toLowerCase().split(/\s+/).filter((t) => t.length > 2)
+  if (data.error) {
+    console.error("[jobs] SerpAPI error:", data.error)
+    throw new Error(`SerpAPI: ${data.error}`)
+  }
 
-  return (data.results ?? [])
-    .filter((job) => {
-      // Only keep jobs whose title actually contains at least one term from the role
-      const titleLower = job.title.toLowerCase()
-      return roleTerms.some((term) => titleLower.includes(term))
+  const jobs: JobResult[] = (data.jobs_results ?? [])
+    .map((job) => {
+      const applyUrl = getLinkedInApplyUrl(job)
+      const senior = isSeniorRole(job.title, job.description)
+      return {
+        jobId: job.job_id,
+        title: job.title,
+        company: job.company_name,
+        location: job.location ?? location,
+        applyUrl,
+        via: job.via ?? "Job Board",
+        postedAt: job.detected_extensions?.posted_at,
+        isRemote: job.detected_extensions?.work_from_home ?? isRemote,
+        isSenior: senior,
+      }
     })
-    .map((job) => ({
-      jobId: job.id,
-      // Clean titles like "Frappe Developer(1603.8779)" → "Frappe Developer"
-      title: job.title.replace(/\s*\([\d.\s]+\)\s*$/, "").trim(),
-      company: job.company?.display_name ?? "Unknown",
-      location: job.location?.display_name ?? location,
-      url: job.redirect_url,
-      source: "Adzuna",
-      postedAt: job.created,
-      minSalary: job.salary_min,
-      maxSalary: job.salary_max,
-      salaryCurrency: "INR",
-    }))
+    .filter((j) => j.applyUrl)  // must have an apply link
+
+  // If onlySenior, filter — but keep all if none are senior (so we don't show empty)
+  if (options?.onlySenior) {
+    const seniorOnly = jobs.filter((j) => j.isSenior)
+    return seniorOnly.length > 0 ? seniorOnly : jobs
+  }
+
+  return jobs
 }
 
 export async function filterNewJobs(chatId: string, jobs: JobResult[]): Promise<JobResult[]> {
@@ -129,72 +137,59 @@ export async function markJobsSeen(chatId: string, jobs: JobResult[]) {
         jobId: j.jobId,
         title: j.title,
         company: j.company,
-        url: j.url,
+        url: j.applyUrl,
       })),
     )
     .onConflictDoNothing()
 }
 
-function formatSalary(job: JobResult): string | null {
-  if (!job.minSalary && !job.maxSalary) return null
-  const fmt = (n: number) => {
-    if (n >= 100000) return `₹${(n / 100000).toFixed(1)}L`
-    if (n >= 1000) return `₹${(n / 1000).toFixed(0)}K`
-    return `₹${n}`
-  }
-  if (job.minSalary && job.maxSalary) return `${fmt(job.minSalary)} – ${fmt(job.maxSalary)}/yr`
-  if (job.maxSalary) return `Up to ${fmt(job.maxSalary)}/yr`
-  if (job.minSalary) return `From ${fmt(job.minSalary)}/yr`
-  return null
-}
-
-function sortBySalary(jobs: JobResult[]): JobResult[] {
-  return [...jobs].sort((a, b) => {
-    const salaryA = a.maxSalary ?? a.minSalary ?? 0
-    const salaryB = b.maxSalary ?? b.minSalary ?? 0
-    if (salaryA === 0 && salaryB > 0) return 1
-    if (salaryB === 0 && salaryA > 0) return -1
-    return salaryB - salaryA
-  })
-}
-
 export function formatJobsMessage(jobs: JobResult[], heading: string): string {
-  const sorted = sortBySalary(jobs)
   const lines = [`<b>${escapeHtml(heading)}</b>`, ""]
-  for (const job of sorted.slice(0, 10)) {
-    const salary = formatSalary(job)
+
+  for (const job of jobs.slice(0, 10)) {
+    const locationStr = job.isRemote ? "🌐 Remote" : `📍 ${escapeHtml(job.location)}`
+    const postedStr = job.postedAt ? ` · ${escapeHtml(job.postedAt)}` : ""
+    const seniorBadge = job.isSenior ? " 🔺" : ""
+
     lines.push(
-      `<b>${escapeHtml(job.title)}</b>`,
-      `🏢 ${escapeHtml(job.company)} — 📍 ${escapeHtml(job.location)}`,
-      ...(salary ? [`💰 ${escapeHtml(salary)}`] : []),
-      `🔗 <a href="${job.url}">Apply here</a>`,
+      `<b>${escapeHtml(job.title)}${seniorBadge}</b>`,
+      `🏢 ${escapeHtml(job.company)} — ${locationStr}`,
+      `📌 via ${escapeHtml(job.via)}${postedStr}`,
+      `🔗 <a href="${job.applyUrl}">Apply here</a>`,
       "",
     )
   }
+
   return lines.join("\n").trim()
 }
 
+// Fixed roles for Frappe/ERPNext — these are always searched regardless of resume
+const FRAPPE_ROLES = [
+  "Frappe Developer",
+  "ERPNext Developer",
+  "Senior Frappe Developer",
+  "Frappe ERPNext Developer",
+]
+
 export async function searchAndSendJobs(
   user: BotUser,
-  options?: { onlyNew?: boolean; daysOld?: number },
+  options?: { onlyNew?: boolean; onlySenior?: boolean },
 ): Promise<number> {
-  const roles = (user.roles ?? []).slice(0, 6)
+  // Merge user's parsed roles with the fixed Frappe/ERPNext roles (dedupe)
+  const userRoles = (user.roles ?? []).slice(0, 4)
+  const allRoles = Array.from(new Set([...FRAPPE_ROLES, ...userRoles]))
   const location = user.location ?? "India"
-  if (roles.length === 0) return 0
 
   const allJobs: JobResult[] = []
 
-  for (const role of roles) {
+  for (const role of allRoles.slice(0, 6)) {
     try {
-      // Fetch page 1 and 2 concurrently per role
-      const [page1, page2] = await Promise.allSettled([
-        searchJobs(role, location, { daysOld: options?.daysOld ?? 30, page: 1 }),
-        searchJobs(role, location, { daysOld: options?.daysOld ?? 30, page: 2 }),
-      ])
-      if (page1.status === "fulfilled") allJobs.push(...page1.value)
-      if (page2.status === "fulfilled") allJobs.push(...page2.value)
+      const jobs = await searchJobs(role, location, {
+        onlySenior: options?.onlySenior ?? true,  // default to senior/3+ only
+      })
+      allJobs.push(...jobs)
     } catch (error) {
-      console.error(`[jobs] search failed for role "${role}":`, error)
+      console.error(`[jobs] search failed for "${role}":`, error)
     }
   }
 
@@ -204,10 +199,9 @@ export async function searchAndSendJobs(
 
   if (toSend.length === 0) return 0
 
-  const rolesSummary = roles.slice(0, 3).join(", ")
   const heading = options?.onlyNew
-    ? `${toSend.length} new job posting${toSend.length > 1 ? "s" : ""} for you`
-    : `Top ${Math.min(toSend.length, 10)} matches for ${rolesSummary} in ${location} (last 30 days)`
+    ? `🆕 ${toSend.length} new Frappe/ERPNext job${toSend.length > 1 ? "s" : ""} for you`
+    : `🔍 Top ${Math.min(toSend.length, 10)} Frappe/ERPNext jobs in ${location} (last 30 days)`
 
   await sendMessage(user.chatId, formatJobsMessage(toSend, heading))
   await markJobsSeen(user.chatId, toSend.slice(0, 10))
